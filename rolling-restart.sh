@@ -6,6 +6,12 @@
 #   -s SCRIPT - Script to run on each node to process the update. Script will have access to $MASTER and $NODE
 #   -d SHUTDOWN_SCRIPT - Script to run to stop elasticsearch node.
 
+
+# Percentage of shards (relative to number of shards at beginning) on node at
+# end of process needed to proceed
+SHARDS_PERCENT_PRESENT=0.66
+
+
 while getopts ":d:m:n:s:h" opt; do
     case $opt in
         d)
@@ -75,10 +81,32 @@ do
     path_to_file=$(which ${file})
     if [ "$path_to_file" == "" ]; then
         echo "File not found: $file"
-	echo "Perhaps you need to prepend ./ to the filename."
+        echo "Perhaps you need to prepend ./ to the filename."
         exit -1
     fi
 done
+
+
+# Sets variable $shards equal to number of shards allocated to requested node
+# This will exit with error in the following cases:
+# * Invalid URL/Hostname/Port (CURL HTTP Error)
+# * Shards is empty string or non-integer (cases where API sends unexpected
+#   response)
+get_shards() {
+    tmp_shards=""
+    local node_name=""  # not used, just present for read
+
+    allocations=$(curl -Ss $MASTER/_cat/allocation?h=shards,node)
+    read tmp_shards node_name <<<$(echo "${allocations}" | grep ${HOST})
+
+    if [[ ${tmp_shards} =~ ^[0-9]+$ ]]
+    then
+        echo ">>>>>> Node ${HOST} currently has ${tmp_shards} shards."
+    else
+        echo ">>>>>> shards is NOT valid: ${tmp_shards}"
+        tmp_shards=""
+    fi
+}
 
 # Read the list of nodes into an array.
 IFS=$'\r\n' GLOBIGNORE='*' :; NODES=($(< $NODE_FILE))
@@ -88,6 +116,16 @@ for NODE in ${NODES[@]}; do
     export NODE
     export HOST=${NODE%%:*}  # keep everything before the ':', hostname
     export PORT=${NODE##*:}  # keep everything after the ':', port number
+
+    # Get the number of shards originally allocated to the node
+    get_shards
+    num_shards_orig=${tmp_shards}
+    if ! [[ ${num_shards_orig} =~ ^[0-9]+$ ]]
+    then
+        echo ">>>>>> ERROR fetching original number of shards on ${NODE}"
+        exit 1
+    fi
+    num_shards_min=$(printf "%.f" $(bc <<< "${num_shards_orig} * ${SHARDS_PERCENT_PRESENT}"))
 
     echo ">>>>>> Restarting ${NODE} at $(date)"
 
@@ -119,7 +157,7 @@ for NODE in ${NODES[@]}; do
     result=$?
     if [ $result != 0 ]; then
         printf ">>>>>> Error: [%d] when executing command: '$SHUTDOWN_SCRIPT' for node $NODE" $result
-	exit -1
+        exit -1
     fi
 
     # wait for the node to stop
@@ -217,6 +255,20 @@ for NODE in ${NODES[@]}; do
         fi
 
         sleep 1
+    done
+
+    echo ">>>>>> Minimum number of shards needed to proceed: ${num_shards_min}"
+    get_shards
+    num_shards_curr=${tmp_shards}
+    while [[ "${num_shards_curr}" == "" || "${num_shards_curr}" -le "${num_shards_min}" ]];
+    do
+        echo ">>>>>> Minimum number of shards needed to proceed: ${num_shards_min}"
+        get_shards
+        num_shards_curr=${tmp_shards}
+
+	# If we are in this condition it will typically take hours to get
+        # out of it, so we can sleep a while.
+        sleep 300
     done
 
     echo ">>>>>> Node ${NODE} restart completed at $(date)"
