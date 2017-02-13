@@ -177,7 +177,8 @@ for NODE in ${NODES[@]}; do
     # in ES 2.X and 5.X we have been unable to find an API endpoint that will
     # provide us with a better indication of node availability, so we sleep
     # longer.
-    sleep 60
+    echo ">>>>>> Begin long sleep to give node time to fully join cluster"
+    sleep 300
 
     echo ">>>>>> Re-enabling routing allocation"
     # re-enable routing allocation
